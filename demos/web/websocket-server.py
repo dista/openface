@@ -16,6 +16,7 @@
 
 import os
 import sys
+import time
 fileDir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(fileDir, "..", ".."))
 
@@ -25,7 +26,11 @@ txaio.use_twisted()
 from autobahn.twisted.websocket import WebSocketServerProtocol, \
     WebSocketServerFactory
 from twisted.python import log
-from twisted.internet import reactor
+from twisted.internet import reactor, ssl
+from twisted.web.server import Site
+from twisted.web.static import File
+
+from twisted.python.modules import getModule
 
 import argparse
 import cv2
@@ -53,6 +58,8 @@ import openface
 modelDir = os.path.join(fileDir, '..', '..', 'models')
 dlibModelDir = os.path.join(modelDir, 'dlib')
 openfaceModelDir = os.path.join(modelDir, 'openface')
+
+imgDir = '/tmp/faces'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dlibFacePredictor', type=str, help="Path to dlib's face predictor.",
@@ -92,6 +99,7 @@ class OpenFaceServerProtocol(WebSocketServerProtocol):
     def __init__(self):
         self.images = {}
         self.training = True
+        self.saveImg = False
         self.people = []
         self.svm = None
         if args.unknown:
@@ -114,12 +122,18 @@ class OpenFaceServerProtocol(WebSocketServerProtocol):
         elif msg['type'] == "NULL":
             self.sendMessage('{"type": "NULL"}')
         elif msg['type'] == "FRAME":
-            self.processFrame(msg['dataURL'], msg['identity'])
+            if self.saveImg:
+                self.processImage(msg['dataURL'], msg['identity'])
+            else:
+                self.processFrame(msg['dataURL'], msg['identity'])
             self.sendMessage('{"type": "PROCESSED"}')
         elif msg['type'] == "TRAINING":
+	    print('training value {}', msg['val'])
             self.training = msg['val']
             if not self.training:
                 self.trainSVM()
+        elif msg['type'] == "SAVE_IMG":
+            self.saveImg = msg['val']
         elif msg['type'] == "ADD_PERSON":
             self.people.append(msg['val'].encode('ascii', 'ignore'))
             print(self.people)
@@ -242,6 +256,69 @@ class OpenFaceServerProtocol(WebSocketServerProtocol):
             ]
             self.svm = GridSearchCV(SVC(C=1), param_grid, cv=5).fit(X, y)
 
+    def processImage(self, dataURL, identity):
+        head = "data:image/jpeg;base64,"
+        assert(dataURL.startswith(head))
+        imgdata = base64.b64decode(dataURL[len(head):])
+        imgF = StringIO.StringIO()
+        imgF.write(imgdata)
+        imgF.seek(0)
+        img = Image.open(imgF)
+
+        buf = np.fliplr(np.asarray(img))
+        rgbFrame = np.zeros((300, 400, 3), dtype=np.uint8)
+        rgbFrame[:, :, 0] = buf[:, :, 2]
+        rgbFrame[:, :, 1] = buf[:, :, 1]
+        rgbFrame[:, :, 2] = buf[:, :, 0]
+
+        identities = []
+        # bbs = align.getAllFaceBoundingBoxes(rgbFrame)
+        bb = align.getLargestFaceBoundingBox(rgbFrame)
+        bbs = [bb] if bb is not None else []
+        for bb in bbs:
+            # print(len(bbs))
+            landmarks = align.findLandmarks(rgbFrame, bb)
+            alignedFace = align.align(args.imgDim, rgbFrame, bb,
+                                      landmarks=landmarks,
+                                      landmarkIndices=openface.AlignDlib.OUTER_EYES_AND_NOSE)
+            if alignedFace is None:
+                return
+
+            phash = str(imagehash.phash(Image.fromarray(alignedFace)))
+            if phash in self.images:
+                identity = self.images[phash].identity
+            else:
+                rep = net.forward(alignedFace)
+                # print(rep)
+                self.images[phash] = Face(rep, identity)
+                # TODO: Transferring as a string is suboptimal.
+                # content = [str(x) for x in cv2.resize(alignedFace, (0,0),
+                # fx=0.5, fy=0.5).flatten()]
+                content = [str(x) for x in alignedFace.flatten()]
+                msg = {
+                    "type": "NEW_IMAGE",
+                    "hash": phash,
+                    "content": content,
+                    "identity": identity,
+                    "representation": rep.tolist()
+                }
+                self.sendMessage(json.dumps(msg))
+
+            self.saveImgToDisk(imgdata, identity)
+            return
+
+    def saveImgToDisk(self, imgdata, identity):
+        people_dir = os.path.join(imgDir, self.people[identity])
+        if not os.path.isdir(people_dir):
+            os.mkdir(people_dir)
+
+        tm = int(round(time.time() * 1000))
+        file_path = os.path.join(people_dir, "%d.jpeg" % tm)
+
+        f = open(file_path, 'w')
+        f.write(imgdata)
+        f.close()
+
     def processFrame(self, dataURL, identity):
         head = "data:image/jpeg;base64,"
         assert(dataURL.startswith(head))
@@ -356,9 +433,17 @@ class OpenFaceServerProtocol(WebSocketServerProtocol):
 if __name__ == '__main__':
     log.startLogging(sys.stdout)
 
-    factory = WebSocketServerFactory("ws://localhost:{}".format(args.port),
+    factory = WebSocketServerFactory("wss://localhost:{}".format(args.port),
                                      debug=False)
     factory.protocol = OpenFaceServerProtocol
 
-    reactor.listenTCP(args.port, factory)
+    webdir = File("/root/src/openface/demos/web")
+    webdir.contentTypes['.crt'] = 'application/x-x509-ca-cert'
+    web = Site(webdir)
+
+    certData = getModule(__name__).filePath.sibling('server.pem').getContent()
+    certificate = ssl.PrivateCertificate.loadPEM(certData)
+
+    reactor.listenSSL(8000, web, certificate.options())
+    reactor.listenSSL(9000, factory, certificate.options())
     reactor.run()

@@ -37,6 +37,11 @@ modelDir = os.path.join(fileDir, '..', 'models')
 dlibModelDir = os.path.join(modelDir, 'dlib')
 openfaceModelDir = os.path.join(modelDir, 'openface')
 
+print fileDir
+print modelDir
+print dlibModelDir
+print openfaceModelDir
+
 parser = argparse.ArgumentParser()
 
 parser.add_argument('imgs', type=str, nargs='+', help="Input images.")

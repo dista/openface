@@ -258,6 +258,22 @@ function addPersonCallback(el) {
     redrawPeople();
 }
 
+function saveImgChkCallback() {
+    savingImg = $("#saveImgChk").prop('checked');
+    if (savingImg) {
+        makeTabActive("tab-preview");
+    } else {
+        makeTabActive("tab-annotated");
+    }
+    if (socket != null) {
+        var msg = {
+            'type': 'SAVE_IMG',
+            'val': savingImg
+        };
+        socket.send(JSON.stringify(msg));
+    }
+}
+
 function trainingChkCallback() {
     training = $("#trainingChk").prop('checked');
     if (training) {
@@ -327,24 +343,23 @@ function changeServerCallback() {
     $(this).addClass("active").siblings().removeClass("active");
     switch ($(this).html()) {
     case "Local":
-        socket.close();
         redrawPeople();
-        createSocket("ws:" + window.location.hostname + ":9000", "Local");
+        createSocket("wss://" + window.location.hostname + ":9000", "Local");
         break;
     case "CMU":
         socket.close();
         redrawPeople();
-        createSocket("ws://facerec.cmusatyalab.org:9000", "CMU");
+        createSocket("wss://facerec.cmusatyalab.org:9000", "CMU");
         break;
     case "AWS East":
         socket.close();
         redrawPeople();
-        createSocket("ws://54.159.128.49:9000", "AWS-East");
+        createSocket("wss://54.159.128.49:9000", "AWS-East");
         break;
     case "AWS West":
         socket.close();
         redrawPeople();
-        createSocket("ws://54.188.234.61:9000", "AWS-West");
+        createSocket("wss://54.188.234.61:9000", "AWS-West");
         break;
     default:
         alert("Unrecognized server: " + $(this.html()));
